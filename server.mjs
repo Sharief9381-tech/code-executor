@@ -20,7 +20,7 @@
  */
 import { createServer }  from 'node:http'
 import { exec, execSync } from 'node:child_process'
-import { writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs'
+import { writeFileSync, mkdirSync, rmSync, existsSync, readFileSync } from 'node:fs'
 import { randomUUID }    from 'node:crypto'
 import path              from 'node:path'
 import os                from 'node:os'
@@ -38,16 +38,16 @@ const SANDBOX = detectSandbox()
 
 // ── Language configs ──────────────────────────────────────────────────────────
 const LANGUAGES = {
-  python:     { filename: 'main.py',   compile: null,                           run: 'python3 main.py',              docker: 'python:3.11-slim'           },
-  javascript: { filename: 'main.js',   compile: null,                           run: 'node main.js',                 docker: 'node:20-slim'               },
-  typescript: { filename: 'main.ts',   compile: null,                           run: 'npx --yes ts-node --skip-project main.ts', docker: 'node:20-slim'  },
-  java:       { filename: 'Main.java', compile: 'javac Main.java',              run: 'java -cp . Main',              docker: 'eclipse-temurin:17-jdk-jammy'},
-  'c++':      { filename: 'main.cpp',  compile: 'g++ -O2 -o main main.cpp',    run: './main',                       docker: 'gcc:13'                     },
-  c:          { filename: 'main.c',    compile: 'gcc -O2 -o main main.c',      run: './main',                       docker: 'gcc:13'                     },
-  go:         { filename: 'main.go',   compile: null,                           run: 'go run main.go',               docker: 'golang:1.21-alpine'         },
-  'c#':       { filename: 'main.cs',   compile: null,                           run: 'dotnet script main.cs',        docker: 'mcr.microsoft.com/dotnet/sdk:8.0' },
-  kotlin:     { filename: 'main.kt',   compile: 'kotlinc main.kt -include-runtime -d main.jar 2>/dev/null', run: 'java -jar main.jar', docker: 'eclipse-temurin:17-jdk-jammy' },
-  swift:      { filename: 'main.swift',compile: null,                           run: 'swift main.swift',             docker: 'swift:5.9-slim'             },
+  python:     { filename: 'main.py',   compile: null,                           run: '/usr/bin/python3 main.py',              docker: 'python:3.11-slim'           },
+  javascript: { filename: 'main.js',   compile: null,                           run: '/usr/bin/node main.js',                 docker: 'node:20-slim'               },
+  typescript: { filename: 'main.ts',   compile: null,                           run: '/usr/bin/npx --yes ts-node --skip-project main.ts', docker: 'node:20-slim'  },
+  java:       { filename: 'Main.java', compile: '/usr/bin/javac Main.java',     run: '/usr/bin/java -cp . Main',              docker: 'eclipse-temurin:17-jdk-jammy'},
+  'c++':      { filename: 'main.cpp',  compile: '/usr/bin/g++ -O2 -o main main.cpp',    run: './main',                       docker: 'gcc:13'                     },
+  c:          { filename: 'main.c',    compile: '/usr/bin/gcc -O2 -o main main.c',      run: './main',                       docker: 'gcc:13'                     },
+  go:         { filename: 'main.go',   compile: null,                           run: '/usr/local/go/bin/go run main.go',      docker: 'golang:1.21-alpine'         },
+  'c#':       { filename: 'main.cs',   compile: null,                           run: '/usr/bin/dotnet script main.cs',        docker: 'mcr.microsoft.com/dotnet/sdk:8.0' },
+  kotlin:     { filename: 'main.kt',   compile: '/usr/bin/kotlinc main.kt -include-runtime -d main.jar 2>/dev/null', run: '/usr/bin/java -jar main.jar', docker: 'eclipse-temurin:17-jdk-jammy' },
+  swift:      { filename: 'main.swift',compile: null,                           run: '/usr/bin/swift main.swift',             docker: 'swift:5.9-slim'             },
 }
 
 function normalizeLang(lang) {
@@ -58,56 +58,59 @@ function normalizeLang(lang) {
 // ── isolate execution ─────────────────────────────────────────────────────────
 async function runWithIsolate({ code, language, stdin, timeoutMs }) {
   const cfg     = LANGUAGES[language]
-  const boxId   = Math.floor(Math.random() * 900) + 100  // box 100-999
+  const boxId   = Math.floor(Math.random() * 99)  // 0-98, within num_boxes=100
   const timeout = Math.ceil(timeoutMs / 1000)
+  const boxPath = `/var/local/lib/isolate/${boxId}/box`
 
   try {
     // Init box
-    execSync(`isolate --box-id=${boxId} --init`, { stdio: 'pipe' })
-    const boxDir = execSync(`isolate --box-id=${boxId} --init`, { stdio: 'pipe' }).toString().trim() + '/box'
+    execSync(`/usr/local/bin/isolate --box-id=${boxId} --init`, { stdio: 'pipe' })
 
-    // Write files
-    writeFileSync(`${boxDir}/${cfg.filename}`, code)
-    writeFileSync(`${boxDir}/stdin.txt`, stdin)
+    // Write files into box
+    writeFileSync(`${boxPath}/${cfg.filename}`, code)
+    writeFileSync(`${boxPath}/stdin.txt`, stdin)
 
     // Compile if needed
     if (cfg.compile) {
-      const compileResult = execSync(
-        `isolate --box-id=${boxId} --time=30 --mem=262144 --run -- /bin/sh -c "cd /box && ${cfg.compile} 2>compile_err.txt"`,
-        { stdio: 'pipe', timeout: 35000 }
-      ).toString()
-      const compileErr = existsSync(`${boxDir}/compile_err.txt`)
-        ? require('fs').readFileSync(`${boxDir}/compile_err.txt`, 'utf8') : ''
-      if (compileErr) throw new Error(`Compilation Error:\n${compileErr}`)
+      try {
+        execSync(
+          `/usr/local/bin/isolate --box-id=${boxId} --time=30 --mem=262144 --processes=64 --env=PATH=/usr/bin:/bin --run -- /bin/sh -c "cd /box && ${cfg.compile} 2>compile_err.txt"`,
+          { stdio: 'pipe', timeout: 35000 }
+        )
+      } catch {
+        const errFile = `${boxPath}/compile_err.txt`
+        const compileErr = existsSync(errFile) ? readFileSync(errFile, 'utf8') : 'Compilation failed'
+        return { output: '', error: `Compilation Error:\n${compileErr.trim()}`, runtimeMs: 0, tle: false }
+      }
     }
 
     // Run
     const start = Date.now()
-    const runResult = execSync(
-      `isolate --box-id=${boxId}` +
-      ` --time=${timeout}` +
-      ` --wall-time=${timeout + 2}` +
-      ` --mem=262144` +           // 256MB
-      ` --processes=64` +
-      ` --stdin=${boxDir}/stdin.txt` +
-      ` --stdout=stdout.txt` +
-      ` --stderr=stderr.txt` +
-      ` --run -- /bin/sh -c "${cfg.run}"`,
-      { stdio: 'pipe', timeout: (timeout + 5) * 1000 }
-    ).toString()
+    let stdout = '', tle = false, error = ''
+    try {
+      const result = execSync(
+        `/usr/local/bin/isolate --box-id=${boxId}` +
+        ` --time=${timeout}` +
+        ` --wall-time=${timeout + 2}` +
+        ` --mem=262144` +
+        ` --processes=64` +
+        ` --env=PATH=/usr/bin:/bin:/usr/local/bin` +
+        ` --stdin=/box/stdin.txt` +
+        ` --run -- ${cfg.run}`,
+        { stdio: 'pipe', timeout: (timeout + 5) * 1000 }
+      )
+      stdout = result.toString().trim()
+    } catch (e) {
+      const msg = e.stderr?.toString() ?? e.message ?? ''
+      tle   = msg.includes('Time limit') || msg.includes('TO:')
+      error = tle ? 'Time Limit Exceeded' : msg.slice(0, 500)
+    }
     const runtimeMs = Date.now() - start
 
-    const output = existsSync(`${boxDir}/stdout.txt`) ? require('fs').readFileSync(`${boxDir}/stdout.txt`, 'utf8').trim() : ''
-    const stderr = existsSync(`${boxDir}/stderr.txt`) ? require('fs').readFileSync(`${boxDir}/stderr.txt`, 'utf8').trim() : ''
+    return { output: stdout, error, runtimeMs: Math.max(0, runtimeMs - 100), tle }
 
-    return { output, error: stderr, runtimeMs, tle: false }
-
-  } catch (e) {
-    const msg = e.message ?? ''
-    const tle = msg.includes('Time Limit') || msg.includes('TO')
-    return { output: '', error: tle ? 'Time Limit Exceeded' : msg.slice(0, 500), runtimeMs: tle ? timeoutMs : 0, tle }
   } finally {
-    try { execSync(`isolate --box-id=${boxId} --cleanup`, { stdio: 'pipe' }) } catch {}
+    try { execSync(`/usr/local/bin/isolate --box-id=${boxId} --cleanup`, { stdio: 'pipe' }) } catch {}
   }
 }
 
