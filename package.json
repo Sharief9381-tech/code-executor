@@ -1,0 +1,16 @@
+{
+  "name": "codehiring-executor",
+  "version": "1.0.0",
+  "description": "Sandboxed Docker-based code execution engine for CodeHiring",
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start":   "node server.mjs",
+    "dev":     "node --watch server.mjs",
+    "setup":   "node setup.mjs",
+    "test":    "node test.mjs"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
